@@ -24,8 +24,69 @@ def find_login_sequences(rows, min_failures=3, window_minutes=5):
     Parameters are positive numbers. Use loops, dictionaries, lists, sorted,
     and the imported timedelta. No additional packages are needed.
     """
-    # TODO 1: replace this raise with your implementation.
-    raise NotImplementedError('Complete find_login_sequences')
+    
+    # Group failed login events by username, source IP and host.
+    failures_by_group = {}
+
+    for row in rows:
+        if row['result'] == 'FAIL':
+            key = (row['username'], row['source_ip'], row['host'])
+
+            if key not in failures_by_group:
+                failures_by_group[key] = []
+
+            failures_by_group[key].append(row)
+
+    alerts = []
+
+    # Evaluate every successful login independently.
+    for success in rows:
+        if success['result'] != 'SUCCESS':
+            continue
+
+        key = (
+            success['username'],
+            success['source_ip'],
+            success['host']
+        )
+
+        success_time = success['timestamp']
+        window_start = success_time - timedelta(minutes=window_minutes)
+
+        matching_failures = []
+
+        for failure in failures_by_group.get(key, []):
+            if window_start <= failure['timestamp'] < success_time:
+                matching_failures.append(failure)
+
+        # Create an alert when the threshold is reached.
+        if len(matching_failures) >= min_failures:
+            matching_failures.sort(
+                key=lambda row: (row['timestamp'], row['event_id'])
+            )
+
+            alerts.append({
+                'username': success['username'],
+                'source_ip': success['source_ip'],
+                'host': success['host'],
+                'session_id': success['session_id'],
+                'success_id': success['event_id'],
+                'success_time': success_time,
+                'failure_ids': [
+                    failure['event_id']
+                    for failure in matching_failures
+                ]
+            })
+
+    alerts.sort(
+        key=lambda alert: (
+            alert['success_time'],
+            alert['success_id']
+        )
+    )
+
+    return alerts
+
 
 def correlate_downloads(alerts, file_rows, followup_minutes=10):
     """Enrich each alert with file activity; return a new list of new dicts.
@@ -45,7 +106,57 @@ def correlate_downloads(alerts, file_rows, followup_minutes=10):
     only on a shared account. No hardcoded IDs or outcomes; no extra packages.
     """
     # TODO 2: replace this raise with your implementation.
-    raise NotImplementedError('Complete correlate_downloads')
+    
+    findings = []
+
+    for alert in alerts:
+        success_time = alert['success_time']
+        window_end = success_time + timedelta(minutes=followup_minutes)
+
+        matching_downloads = []
+
+        for row in file_rows:
+            if (
+                row['username'] == alert['username']
+                and row['host'] == alert['host']
+                and row['session_id'] == alert['session_id']
+                and row['action'] == 'DOWNLOAD'
+                and row['result'] == 'SUCCESS'
+                and success_time <= row['timestamp'] <= window_end
+            ):
+                matching_downloads.append(row)
+
+        # Sort downloads chronologically.
+        matching_downloads.sort(
+            key=lambda row: (row['timestamp'], row['event_id'])
+        )
+
+        # Copy the original alert and enrich it with download information.
+        result = dict(alert)
+
+        result['download_ids'] = [
+            row['event_id'] for row in matching_downloads
+        ]
+
+        result['download_count'] = len(matching_downloads)
+
+        result['total_bytes'] = sum(
+            row['bytes'] for row in matching_downloads
+        )
+
+        findings.append(result)
+
+    # Rank by descending bytes, then success time and success ID.
+    findings.sort(
+        key=lambda item: (
+            -item['total_bytes'],
+            item['success_time'],
+            item['success_id']
+        )
+    )
+
+    return findings
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
